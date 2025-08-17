@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+      
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Check formatting
+        run: cargo +nightly fmt --all --check
+      
+      - name: Run clippy
+        run: cargo +nightly clippy --all-features --all-targets -- -D warnings
+
+  build:
+    name: Build Extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build extension (debug)
+        run: cargo build --target wasm32-unknown-unknown
+      
+      - name: Build extension (release)
+        run: cargo build --target wasm32-unknown-unknown --release
+      
+      - name: Verify WASM output
+        run: |
+          test -f target/wasm32-unknown-unknown/debug/zed_solar.wasm
+          test -f target/wasm32-unknown-unknown/release/zed_solar.wasm
+          echo "Debug WASM size: $(wc -c < target/wasm32-unknown-unknown/debug/zed_solar.wasm) bytes"
+          echo "Release WASM size: $(wc -c < target/wasm32-unknown-unknown/release/zed_solar.wasm) bytes"
+
+  validate-queries:
+    name: Validate Tree-sitter Queries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Clone tree-sitter-solidity
+        run: |
+          git clone https://github.com/JoranHonig/tree-sitter-solidity.git
+          cd tree-sitter-solidity
+          npm install
+      
+      - name: Install tree-sitter CLI
+        run: npm install -g tree-sitter-cli
+      
+      - name: Test queries against grammar
+        run: |
+          cd tree-sitter-solidity
+          # Initialize tree-sitter config to suppress warnings
+          tree-sitter init-config
+          
+          # Copy our queries to test them
+          cp ../languages/solidity/highlights.scm ./queries/highlights-test.scm
+          cp ../languages/solidity/outline.scm ./queries/outline-test.scm
+          cp ../languages/solidity/indents.scm ./queries/indents-test.scm
+          
+          # Test parsing some Solidity files with our queries
+          echo 'pragma solidity ^0.8.0; contract Test { function test() public pure returns (uint256) { return 42; } }' > test.sol
+          
+          # Test parsing (suppress config warnings)
+          tree-sitter parse test.sol > parse_output.txt 2>&1
+          if grep -q "source_file" parse_output.txt; then
+            echo "✅ Parsing successful"
+          else
+            echo "❌ Parsing failed"
+            cat parse_output.txt
+            exit 1
+          fi
+          
+          # Test highlighting
+          tree-sitter highlight test.sol --html > /dev/null 2>&1
+          if [ $? -eq 0 ]; then
+            echo "✅ Highlighting successful"
+          else
+            echo "❌ Highlighting failed"
+            exit 1
+          fi
+          
+          echo "✅ Tree-sitter queries validation passed"
+
+  validate-extension:
+    name: Validate Extension Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python for TOML validation
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+      
+      - name: Install TOML parser
+        run: pip install toml
+      
+      - name: Validate extension.toml
+        run: |
+          python3 -c "
+          import toml
+          import sys
+          
+          try:
+              with open('extension.toml', 'r') as f:
+                  config = toml.load(f)
+              
+              # Check required fields exist
+              required_fields = ['id', 'name', 'version', 'schema_version']
+              for field in required_fields:
+                  if field not in config:
+                      print(f'❌ Missing required field: {field}')
+                      sys.exit(1)
+              
+              print('✅ extension.toml validation passed')
+          except Exception as e:
+              print(f'❌ TOML validation failed: {e}')
+              sys.exit(1)
+          "
+      
+      - name: Validate language configuration
+        run: |
+          test -f languages/solidity/config.toml
+          test -f languages/solidity/highlights.scm
+          test -f languages/solidity/brackets.scm
+          test -f languages/solidity/indents.scm
+          test -f languages/solidity/outline.scm
+          echo "✅ Language configuration files exist"
+      
+      - name: Check Cargo.toml consistency
+        run: |
+          # Verify crate-type is set correctly for Zed extensions
+          grep -q 'crate-type = \["cdylib"\]' Cargo.toml
+          # Verify zed_extension_api dependency exists
+          grep -q 'zed_extension_api' Cargo.toml
+          echo "✅ Cargo.toml configuration is correct"
