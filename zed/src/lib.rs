@@ -107,7 +107,7 @@ impl zed::Extension for SolarExtension {
                 let command_path = self.language_server_binary(language_server_id, worktree)?;
                 Ok(zed::Command {
                     command: command_path,
-                    args: vec!["--lsp".to_string()],
+                    args: vec!["lsp".to_string()],
                     env: Default::default(),
                 })
             }
